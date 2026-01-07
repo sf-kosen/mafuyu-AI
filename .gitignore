@@ -1,0 +1,38 @@
+# Environment files
+discord.env
+.env
+*.env
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+env/
+.venv/
+
+# Data & Logs
+data/
+outputs/
+*.log
+*.db
+
+# Temporary files
+*.tmp
+*_out.txt
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# Training data (private)
+mafuyu_sft_messages.jsonl
+mafuyu_lm_text.jsonl
+tweets.js
+
+# OS
+.DS_Store
+Thumbs.db
