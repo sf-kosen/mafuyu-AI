@@ -1,7 +1,6 @@
 # Tool Definitions and Executor
 import json
 import ipaddress
-import os
 import socket
 import subprocess
 import threading
@@ -14,9 +13,13 @@ from urllib.parse import quote_plus, urlparse
 
 from config import (
     CODEX_CMD,
+    CODEX_BRIDGE_DIR,
     CODEX_LOG_TAIL_LINES,
     DATA_DIR,
     FETCH_MAX_CHARS,
+    FETCH_MAX_HTML_BYTES,
+    FETCH_MAX_JSON_BYTES,
+    FETCH_MAX_TEXT_BYTES,
     LOGS_DIR,
     WORKSPACE_DIR,
 )
@@ -187,6 +190,7 @@ def fetch_public_response(url: str) -> tuple[str, urllib3.response.BaseHTTPRespo
                 resolved["target"],
                 headers=headers,
                 redirect=False,
+                preload_content=False,
                 timeout=urllib3.Timeout(connect=10.0, read=30.0),
                 retries=False,
             )
@@ -204,6 +208,57 @@ def fetch_public_response(url: str) -> tuple[str, urllib3.response.BaseHTTPRespo
     if last_error is None:
         raise ValueError("No resolved public IPs were available")
     raise last_error
+
+
+def _reject_oversized_response(resp: urllib3.response.BaseHTTPResponse, max_bytes: int) -> None:
+    """Content-Length が明示されている場合は、受信前に大きすぎる応答を拒否する。"""
+    content_length = resp.headers.get("Content-Length")
+    if not content_length:
+        return
+
+    try:
+        expected_size = int(content_length)
+    except ValueError:
+        return
+
+    if expected_size > max_bytes:
+        raise ValueError(f"Response body too large: {expected_size} bytes (limit: {max_bytes})")
+
+
+def _read_limited_response_body(resp: urllib3.response.BaseHTTPResponse, max_bytes: int) -> bytes:
+    """
+    応答本文をストリームで読み、展開後サイズに上限を掛ける。
+    gzip などで圧縮された本文も decode_content=True で展開後サイズを数える。
+    """
+    _reject_oversized_response(resp, max_bytes)
+
+    body = bytearray()
+    for chunk in resp.stream(64 * 1024, decode_content=True):
+        if not chunk:
+            continue
+
+        remaining = max_bytes - len(body)
+        if remaining <= 0:
+            raise ValueError(f"Response body exceeds {max_bytes} bytes")
+
+        if len(chunk) > remaining:
+            body.extend(chunk[:remaining])
+            raise ValueError(f"Response body exceeds {max_bytes} bytes")
+
+        body.extend(chunk)
+
+    return bytes(body)
+
+
+def _codex_bridge_paths() -> tuple[Path, Path, Path]:
+    """Codex bridge 用の入出力ファイルを sandbox 配下にまとめる。"""
+    bridge_dir = CODEX_BRIDGE_DIR
+    bridge_dir.mkdir(parents=True, exist_ok=True)
+    return (
+        bridge_dir,
+        bridge_dir / "request.json",
+        bridge_dir / "output.log",
+    )
 
 
 # ============ File Tools (Full Access Mode) ============
@@ -324,7 +379,10 @@ def fetch_url(url: str) -> dict:
     """公開URLの本文を文字列として取得する。"""
     try:
         validated_url, resp = fetch_public_response(url)
-        text_full = resp.data.decode("utf-8", errors="replace")
+        try:
+            text_full = _read_limited_response_body(resp, FETCH_MAX_TEXT_BYTES).decode("utf-8", errors="replace")
+        finally:
+            resp.release_conn()
 
         text = text_full[:FETCH_MAX_CHARS]
         truncated = len(text_full) > FETCH_MAX_CHARS
@@ -343,7 +401,10 @@ def fetch_json(url: str) -> dict:
     """公開URLの JSON を取得して Python オブジェクトへ変換する。"""
     try:
         validated_url, resp = fetch_public_response(url)
-        body = resp.data.decode("utf-8", errors="strict")
+        try:
+            body = _read_limited_response_body(resp, FETCH_MAX_JSON_BYTES).decode("utf-8", errors="strict")
+        finally:
+            resp.release_conn()
         
         return {
             "url": validated_url,
@@ -367,8 +428,10 @@ def read_url(url: str) -> dict:
         from bs4 import BeautifulSoup
 
         validated_url, resp = fetch_public_response(url)
-        
-        html = resp.data.decode("utf-8", errors="replace")
+        try:
+            html = _read_limited_response_body(resp, FETCH_MAX_HTML_BYTES).decode("utf-8", errors="replace")
+        finally:
+            resp.release_conn()
         soup = BeautifulSoup(html, "html.parser")
         
         # スクリプトやレイアウト要素は本文抽出のノイズになるので落とす。
@@ -659,19 +722,12 @@ def codex_run_captured(prompt: str, workdir: str = ".") -> dict:
     Returns immediately after sending the request.
     Use 'codex_read_output' to see progress.
     """
-    base_dir = r"c:\Users\Yukic\Desktop\mafuyu-sama"
-    bridge_dir = os.path.join(base_dir, "codex_bridge")
-    
-    request_file = os.path.join(bridge_dir, "request.json")
-    
-    if not os.path.exists(bridge_dir):
-        try: os.makedirs(bridge_dir)
-        except: pass
+    _, request_file, _ = _codex_bridge_paths()
 
     req_data = {"prompt": prompt}
     
     try:
-        with open(request_file, "w", encoding="utf-8") as f:
+        with request_file.open("w", encoding="utf-8") as f:
             json.dump(req_data, f, ensure_ascii=False, indent=2)
         
         # We wait a brief moment to let Bridge pick it up?
@@ -685,21 +741,17 @@ def codex_read_output(lines: int = 20) -> dict:
     """
     Read the latest output from the Codex Bridge.
     """
-    base_dir = r"c:\Users\Yukic\Desktop\mafuyu-sama"
-    bridge_dir = os.path.join(base_dir, "codex_bridge")
-    output_file = os.path.join(bridge_dir, "output.log")
+    _, _, output_file = _codex_bridge_paths()
     
-    if not os.path.exists(output_file):
+    if not output_file.exists():
         return {"success": True, "output": "(No output log found yet)", "exit_code": 0}
         
     try:
-        # Read full file? Efficient enough for logs.
-        with open(output_file, "r", encoding="utf-8", errors="replace") as f:
-            content = f.read()
-            
-        # Get last N lines? Or just return all if not huge?
-        # Let's return all.
-        return {"success": True, "output": content, "exit_code": 0}
+        with output_file.open("r", encoding="utf-8", errors="replace") as f:
+            content = f.read().splitlines()
+
+        tail = "\n".join(content[-max(1, lines):])
+        return {"success": True, "output": tail, "exit_code": 0}
     except Exception as e:
         return {"success": False, "output": f"Error reading log: {e}", "exit_code": -1}
 
@@ -707,12 +759,11 @@ def codex_send_input(text: str) -> dict:
     """
     Send text input (e.g. 'yes', 'no') to the running Codex task.
     """
-    base_dir = r"c:\Users\Yukic\Desktop\mafuyu-sama"
-    bridge_dir = os.path.join(base_dir, "codex_bridge")
-    input_file = os.path.join(bridge_dir, "input.txt")
+    bridge_dir, _, _ = _codex_bridge_paths()
+    input_file = bridge_dir / "input.txt"
     
     try:
-        with open(input_file, "w", encoding="utf-8") as f:
+        with input_file.open("w", encoding="utf-8") as f:
             f.write(text)
         return {"success": True, "output": f"Sent input: {text}", "exit_code": 0}
     except Exception as e:

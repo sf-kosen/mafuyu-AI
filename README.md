@@ -20,10 +20,10 @@
 - ツールレイヤ: `tools.py` に検索/URL抽出/ファイル操作/Python実行/Codex連携などを実装。`execute_tool` で JSON 形式に統一し 2000 文字でトリミング
 - 記憶と感情: `memory.py` でキーワード検索可能な長期記憶を JSON に保存、`emotion.py` で affection/mood/energy を時間経過で回復させつつ管理
 - LLM バックエンド: `llm.py` が Ollama API を呼び出し、`llm_hf.py` で HuggingFace/LoRA 推論を選択可能 (`LLM_BACKEND` スイッチ)
-- Discord ボット: `discord_bot.py` がメンション/DM でセッションを分離し、`ALLOWED_USER` の DM のみ許可、`FREE_CHAT_CHANNELS` はメンション不要。1時間以上経過かつ深夜帯外なら自律発話
+- Discord ボット: `discord_bot.py` がメンション/DM でセッションを分離し、DM は `DISCORD_ALLOWED_USER_ID` のみ許可、`FREE_CHAT_CHANNELS` はメンション不要。1時間以上経過かつ深夜帯外なら自律発話
 - CLI チャット: `main.py` はシンプルに入力→ReAct 応答を返す。`/clear` や `/exit` をサポート
 - Codex ブリッジ: `codex_run_sync` などで Codex CLI を新しいウィンドウで起動しログ監視 (`CODEX_LOG_TAIL_LINES`)。`agent.py/state.py` は Codex 連携エージェントのステート管理
-- データ/ログ: `data/` 配下に `memory.json`/`emotion.json`/`logs/` を自動生成。ファイル操作ツールは任意パスを書き換えるので運用環境では権限制御に注意
+- データ/ログ: `data/` 配下に `memory.json`/`emotion.json`/`logs/` を自動生成。ファイル操作ツールは `data/workspace/` 配下に閉じ込め、Codex bridge も同じ sandbox 配下に配置
 
 ## 必要環境
 - Python 3.10+
@@ -56,6 +56,7 @@ ollama pull gemma3:12b
 ```bash
 copy .env.example discord.env
 # discord.env もしくは環境変数で DISCORD_TOKEN=your_token_here
+# DM を許可する Discord の数値 user.id を DISCORD_ALLOWED_USER_ID に設定
 ```
 6) 起動
 - CLI: `python main.py`
@@ -63,7 +64,7 @@ copy .env.example discord.env
 
 ## 使い方
 - CLI: `/clear` (履歴クリア), `/exit` (終了)
-- Discord: サーバーではメンションで応答。`FREE_CHAT_CHANNELS` の ID ならメンション不要。DM は `ALLOWED_USER` の名前だけ許可 (デフォルト `mikan.1111`)
+- Discord: サーバーではメンションで応答。`FREE_CHAT_CHANNELS` の ID ならメンション不要。DM は `DISCORD_ALLOWED_USER_ID` に一致する user.id だけ許可
 - 自律発話: 最後の会話から1時間以上経過かつ 0-6 時を除くとき、DM チャンネルに一言投下する場合あり
 - ツール利用例:
 ```text
@@ -93,7 +94,8 @@ copy .env.example discord.env
 | `OLLAMA_URL` | `http://localhost:11434/api/chat` | Ollama API エンドポイント |
 | `OLLAMA_MODEL` | `gemma3:12b` | 使用モデル |
 | `CODEX_CMD` | `codex` | Codex CLI コマンド |
-| `FETCH_MAX_CHARS` | `10000` | URL 取得時の最大文字数 |
+| `FETCH_MAX_CHARS` | `10000` | URL 取得時に返す最大文字数 |
+| `FETCH_MAX_TEXT_BYTES` / `FETCH_MAX_JSON_BYTES` / `FETCH_MAX_HTML_BYTES` | `524288` / `524288` / `1048576` | URL 取得時の実受信上限。大きい応答でメモリを使い切らないための制限 |
 | `CODEX_LOG_TAIL_LINES` | `80` | Codex ログ tail 行数 |
 
 キャラクターや Few-shot は `mafuyu_system_prompt.txt` / `mafuyu_fewshot_messages.json` を編集。長期記憶と感情は `data/memory.json` / `data/emotion.json` に保存されます。

@@ -11,6 +11,7 @@ if sys.platform == 'win32':
     asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
 from mafuyu import MafuyuSession
+from config import DISCORD_ALLOWED_USER_ID
 
 # Bot設定
 intents = discord.Intents.default()
@@ -25,9 +26,12 @@ last_user_name = None
 last_message_time = None
 from datetime import datetime, timedelta
 
-ALLOWED_USER = 'mikan.1111'
 FREE_CHAT_CHANNELS = [1458301980131721410]
 ALLOWED_ROLE_ID = 1453967404307845232
+
+
+def is_allowed_user(author) -> bool:
+    return DISCORD_ALLOWED_USER_ID > 0 and author.id == DISCORD_ALLOWED_USER_ID
 
 
 def user_has_allowed_role(member) -> bool:
@@ -39,14 +43,14 @@ def user_has_allowed_role(member) -> bool:
 def can_use_tools_in_context(is_dm: bool, author) -> bool:
     """ツール利用を許可するかどうかを判定する。"""
     if is_dm:
-        return author.name == ALLOWED_USER
+        return is_allowed_user(author)
     return user_has_allowed_role(author)
 
 
 def can_chat_in_context(is_dm: bool, author, channel_id: int) -> bool:
     """会話そのものを許可するかどうかを判定する。"""
     if is_dm:
-        return author.name == ALLOWED_USER
+        return is_allowed_user(author)
     return user_has_allowed_role(author) or channel_id in FREE_CHAT_CHANNELS
 
 
@@ -123,6 +127,8 @@ async def run_session_response(
 async def on_ready():
     print(f'=== Mafuyu Bot Online ===')
     print(f'Logged in as: {bot.user}')
+    if DISCORD_ALLOWED_USER_ID <= 0:
+        print("[Config] DISCORD_ALLOWED_USER_ID is not set. DM access is disabled.")
     
     # Launch Codex Bridge in a new window automatically
     bridge_script = "codex_bridge.py"
@@ -197,13 +203,13 @@ async def on_message(message):
     # 【セキュリティ】
     # - DM: 特定のユーザーのみ許可 (他は無視)
     # - Server: 全員許可
-    if is_dm and message.author.name != ALLOWED_USER:
+    if is_dm and not is_allowed_user(message.author):
         return
     
     # 【重要】自律発話のターゲット更新
     # ユーザーの要望: 自律的に話しかけるのは「DMのみ」
     # サーバーで会話しても、自律発話のターゲット（last_channel_id）は書き換えない
-    if is_dm and message.author.name == ALLOWED_USER:
+    if is_dm and is_allowed_user(message.author):
         global last_channel_id, last_user_name, last_message_time
         last_channel_id = message.channel.id
         # DMの場合はGlobal Nameがない場合がある

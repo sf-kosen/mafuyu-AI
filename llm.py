@@ -109,7 +109,7 @@ REPAIR_PROMPT = """The following text was supposed to be valid JSON but has erro
 Fix it and output ONLY the corrected JSON, nothing else.
 
 Expected schema:
-{"action": "tool|say|finish", "tool_name": "string", "args": {}, "message": "string", "note": "string"}
+{{"action": "tool|say|finish", "tool_name": "string", "args": {{}}, "message": "string", "note": "string"}}
 
 Broken text:
 {text}
@@ -135,13 +135,13 @@ AGENT_SYSTEM_PROMPT = """You are an autonomous agent. You execute tasks step by 
 CRITICAL: Output ONLY valid JSON. No explanation, no markdown, just JSON.
 
 Schema:
-{
+{{
   "action": "tool",
   "tool_name": "<name of the tool to use>",
-  "args": {"<arg_name>": "<value>"},
+  "args": {{"<arg_name>": "<value>"}},
   "message": "",
   "note": "<your next step memo>"
-}
+}}
 
 IMPORTANT: "action" MUST be exactly one of these strings:
 - "tool" - when using a tool
@@ -149,10 +149,10 @@ IMPORTANT: "action" MUST be exactly one of these strings:
 - "finish" - when the task is complete
 
 CORRECT EXAMPLE (using write_text):
-{"action": "tool", "tool_name": "write_text", "args": {"path": "data/test.txt", "content": "Hello"}, "message": "", "note": "File created"}
+{{"action": "tool", "tool_name": "write_text", "args": {{"path": "data/test.txt", "content": "Hello"}}, "message": "", "note": "File created"}}
 
 WRONG EXAMPLE (DO NOT DO THIS):
-{"action": "write_text", ...}  <-- WRONG! action must be "tool", not the tool name
+{{"action": "write_text", ...}}  <-- WRONG! action must be "tool", not the tool name
 
 Available tools:
 {tool_list}

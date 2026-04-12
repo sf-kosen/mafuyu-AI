@@ -364,8 +364,16 @@ class MafuyuSession:
         for param, sign, value in patterns:
             delta = int(value) if sign == '+' else -int(value)
             param_lower = param.lower()
-            self.emotion.update(user_key, **{param_lower: delta})
-            print(f"[Emotion Update] {user_key}: {param_lower} {sign}{value}")
+            kwargs = {
+                "affection_delta": delta if param_lower == "affection" else 0,
+                "mood_delta": delta if param_lower == "mood" else 0,
+                "energy_delta": delta if param_lower == "energy" else 0,
+            }
+            try:
+                self.emotion.update_state(user_key, **kwargs)
+                print(f"[Emotion Update] {user_key}: {param_lower} {sign}{value}")
+            except Exception as exc:
+                print(f"[Emotion Update] skipped due to error: {exc}")
 
     def _execute_tool_wrapper(self, name: str, raw_args: str) -> str:
         """
