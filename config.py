@@ -5,10 +5,12 @@ from pathlib import Path
 BASE_DIR = Path(__file__).parent
 DATA_DIR = BASE_DIR / "data"
 LOGS_DIR = DATA_DIR / "logs"
+WORKSPACE_DIR = DATA_DIR / "workspace"
 
 # Ensure directories exist
 DATA_DIR.mkdir(exist_ok=True)
 LOGS_DIR.mkdir(exist_ok=True)
+WORKSPACE_DIR.mkdir(exist_ok=True)
 
 # Ollama
 OLLAMA_URL = "http://localhost:11434/api/chat"

@@ -25,6 +25,39 @@ last_user_name = None
 last_message_time = None
 from datetime import datetime, timedelta
 
+ALLOWED_USER = 'mikan.1111'
+FREE_CHAT_CHANNELS = [1458301980131721410]
+ALLOWED_ROLE_ID = 1453967404307845232
+
+
+def user_has_allowed_role(member) -> bool:
+    roles = getattr(member, "roles", [])
+    return any(role.id == ALLOWED_ROLE_ID for role in roles)
+
+
+def can_use_tools_in_context(is_dm: bool, author) -> bool:
+    if is_dm:
+        return author.name == ALLOWED_USER
+    return user_has_allowed_role(author)
+
+
+def can_chat_in_context(is_dm: bool, author, channel_id: int) -> bool:
+    if is_dm:
+        return author.name == ALLOWED_USER
+    return user_has_allowed_role(author) or channel_id in FREE_CHAT_CHANNELS
+
+
+def command_tools_allowed(ctx) -> bool:
+    is_dm = ctx.guild is None
+    return can_use_tools_in_context(is_dm, ctx.author)
+
+
+@bot.check
+async def restrict_privileged_commands(ctx):
+    if ctx.command and ctx.command.name in {"clear", "mafuyu"}:
+        return command_tools_allowed(ctx)
+    return True
+
 def get_session(guild_id: int = None, user_id: int = None) -> MafuyuSession:
     """サーバーごとのセッションを取得。DMの場合はユーザーIDを使用。"""
     # DMの場合はuser_idを使う、サーバーの場合はguild_idを使う
@@ -41,7 +74,13 @@ def strip_bot_mention(content: str) -> str:
     mention_nick = f"<@!{bot.user.id}>"
     return content.replace(mention, "").replace(mention_nick, "").strip()
 
-async def run_session_response(session: MafuyuSession, content: str, user_name: str, message_obj: discord.Message) -> str:
+async def run_session_response(
+    session: MafuyuSession,
+    content: str,
+    user_name: str,
+    message_obj: discord.Message,
+    allow_tools: bool,
+) -> str:
     """同期処理を別スレッドで実行して応答を返す。進捗コールバック付き。"""
     loop = asyncio.get_running_loop()
     
@@ -65,7 +104,14 @@ async def run_session_response(session: MafuyuSession, content: str, user_name: 
     # Note: Actual message editing requires creating the message first.
     # Let's keep it simple: Just pass the callback.
     
-    return await loop.run_in_executor(None, session.respond, content, user_name, progress_callback)
+    return await loop.run_in_executor(
+        None,
+        session.respond,
+        content,
+        user_name,
+        progress_callback,
+        allow_tools,
+    )
 
 
 @bot.event
@@ -86,6 +132,14 @@ async def on_ready():
 
     if not auto_talk_loop.is_running():
         auto_talk_loop.start()
+
+
+@bot.event
+async def on_command_error(ctx, error):
+    if isinstance(error, commands.CheckFailure):
+        await ctx.reply('You are not allowed to use this command here.', allowed_mentions=discord.AllowedMentions.none())
+        return
+    raise error
 
 @tasks.loop(minutes=20.0)
 async def auto_talk_loop():
@@ -137,7 +191,6 @@ async def on_message(message):
     # 【セキュリティ】
     # - DM: 特定のユーザーのみ許可 (他は無視)
     # - Server: 全員許可
-    ALLOWED_USER = 'mikan.1111'
     if is_dm and message.author.name != ALLOWED_USER:
         return
     
@@ -155,14 +208,13 @@ async def on_message(message):
     is_mention = bot.user and bot.user.id in [m.id for m in message.mentions]
     
     # 【Free Chat Channel】メンション不要で自由に話せるチャンネル
-    FREE_CHAT_CHANNELS = [1458301980131721410]
     is_free_chat = message.channel.id in FREE_CHAT_CHANNELS
     
     # 【Role-Based Access】開発者ロール以外はサーバーでメンションできない
-    ALLOWED_ROLE_ID = 1453967404307845232
+    has_allowed_role = False
     if not is_dm:
-        has_allowed_role = any(role.id == ALLOWED_ROLE_ID for role in message.author.roles)
-        if not has_allowed_role and not is_free_chat:
+        has_allowed_role = user_has_allowed_role(message.author)
+        if not can_chat_in_context(is_dm, message.author, message.channel.id):
             return  # 権限なし
     
     if not is_dm and not is_mention and not is_free_chat:
@@ -192,7 +244,8 @@ async def on_message(message):
         session = get_session(guild_id=guild_id, user_id=user_id)
         # ユーザー識別
         user_name = message.author.global_name or message.author.name
-        response = await run_session_response(session, content, user_name, message)
+        allow_tools = is_dm or has_allowed_role
+        response = await run_session_response(session, content, user_name, message, allow_tools)
         # 返信後も時間を更新
         last_message_time = datetime.now()
     
@@ -219,7 +272,7 @@ async def talk_to_mafuyu(ctx, *, message: str = None):
         session = get_session(ctx.channel.id)
         # ユーザー識別
         user_name = ctx.author.global_name or ctx.author.name
-        response = await run_session_response(session, message, user_name, ctx.message)
+        response = await run_session_response(session, message, user_name, ctx.message, True)
     
     await ctx.reply(response, allowed_mentions=discord.AllowedMentions.none())
 

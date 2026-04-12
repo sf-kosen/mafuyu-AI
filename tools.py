@@ -1,28 +1,185 @@
 # Tool Definitions and Executor
 import json
+import ipaddress
 import os
+import socket
 import subprocess
 import threading
-import requests
+import time
 import sqlite3
+import urllib3
 from pathlib import Path
 from typing import Any, Optional
-from urllib.parse import quote_plus
+from urllib.parse import quote_plus, urlparse
 
-from config import DATA_DIR, LOGS_DIR, CODEX_CMD, FETCH_MAX_CHARS, CODEX_LOG_TAIL_LINES
+from config import (
+    CODEX_CMD,
+    CODEX_LOG_TAIL_LINES,
+    DATA_DIR,
+    FETCH_MAX_CHARS,
+    LOGS_DIR,
+    WORKSPACE_DIR,
+)
 
 
-# ============ Path Safety (DISABLED - Full Access Mode) ============
+# ============ Path Safety ============
+
+BLOCKED_HOSTNAMES = {
+    "localhost",
+    "127.0.0.1",
+    "::1",
+    "metadata.google.internal",
+    "169.254.169.254",
+}
+
+SAFE_TOOL_DESCRIPTIONS = {
+    "fetch_json": "fetch_json(url) - Fetch JSON from a public HTTP(S) host.",
+    "fetch_url": "fetch_url(url) - Fetch text from a public HTTP(S) host.",
+    "list_dir": "list_dir(path) - List files inside the sandboxed workspace.",
+    "read_text": "read_text(path) - Read a UTF-8 text file inside the sandboxed workspace.",
+    "read_url": "read_url(url) - Read a public web page as text.",
+    "search_tweets": "search_tweets(query, limit=5) - Search the local tweet memory database.",
+    "search_web": "search_web(query) - Search the public web.",
+}
+
+PRIVILEGED_TOOL_DESCRIPTIONS = {
+    "copy_file": "copy_file(src, dst) - Copy a file or directory inside the sandboxed workspace.",
+    "codex_job_start": "codex_job_start(prompt, workdir) - Start a Codex subprocess.",
+    "codex_job_status": "codex_job_status(job_id) - Read Codex job status and logs.",
+    "codex_job_stop": "codex_job_stop(job_id) - Stop a Codex subprocess.",
+    "codex_read_output": "codex_read_output(lines=20) - Read Codex bridge output.",
+    "codex_run_captured": "codex_run_captured(prompt, workdir) - Forward a prompt to the Codex bridge.",
+    "codex_run_sync": "codex_run_sync(prompt, workdir) - Spawn Codex in a new terminal window.",
+    "codex_send_input": "codex_send_input(text) - Send input to the Codex bridge.",
+    "delete_dir": "delete_dir(path) - Delete a directory inside the sandboxed workspace.",
+    "delete_file": "delete_file(path) - Delete a file inside the sandboxed workspace.",
+    "move_file": "move_file(src, dst) - Move a file or directory inside the sandboxed workspace.",
+    "run_python_code": "run_python_code(code) - Execute arbitrary local Python code.",
+    "write_text": "write_text(path, content) - Write a UTF-8 text file inside the sandboxed workspace.",
+}
+
+
+def describe_available_tools(include_privileged: bool = False) -> str:
+    descriptions = dict(SAFE_TOOL_DESCRIPTIONS)
+    if include_privileged:
+        descriptions.update(PRIVILEGED_TOOL_DESCRIPTIONS)
+    return "\n".join(f"- {value}" for _, value in sorted(descriptions.items()))
 
 def safe_path(rel_path: str) -> Path:
     """
-    Resolve path. Full access mode - no restrictions.
+    Resolve a path inside the sandboxed workspace.
     """
-    # Convert to absolute path
     path = Path(rel_path)
     if not path.is_absolute():
-        path = Path.cwd() / rel_path
-    return path.resolve()
+        path = WORKSPACE_DIR / rel_path
+
+    resolved = path.resolve()
+    workspace_root = WORKSPACE_DIR.resolve()
+
+    try:
+        resolved.relative_to(workspace_root)
+    except ValueError as exc:
+        raise ValueError(f"Path escapes workspace: {rel_path}") from exc
+
+    return resolved
+
+
+def resolve_public_url(url: str) -> dict[str, Any]:
+    parsed = urlparse(url)
+    if parsed.scheme not in {"http", "https"}:
+        raise ValueError("Only http:// and https:// URLs are allowed")
+    if not parsed.hostname:
+        raise ValueError("URL must include a hostname")
+
+    host = parsed.hostname.lower()
+    if host in BLOCKED_HOSTNAMES or host.endswith(".local"):
+        raise ValueError(f"Blocked host: {host}")
+
+    try:
+        addrinfo = socket.getaddrinfo(host, parsed.port or None, proto=socket.IPPROTO_TCP)
+    except socket.gaierror as exc:
+        raise ValueError(f"Failed to resolve host: {host}") from exc
+
+    public_ips = []
+    for _, _, _, _, sockaddr in addrinfo:
+        ip_text = sockaddr[0]
+        ip = ipaddress.ip_address(ip_text)
+        if (
+            ip.is_private
+            or ip.is_loopback
+            or ip.is_link_local
+            or ip.is_multicast
+            or ip.is_reserved
+            or ip.is_unspecified
+        ):
+            raise ValueError(f"Blocked non-public address: {ip_text}")
+        if ip_text not in public_ips:
+            public_ips.append(ip_text)
+
+    target = parsed.path or "/"
+    if parsed.query:
+        target += f"?{parsed.query}"
+
+    return {
+        "url": url,
+        "parsed": parsed,
+        "host": host,
+        "port": parsed.port or (443 if parsed.scheme == "https" else 80),
+        "scheme": parsed.scheme,
+        "target": target,
+        "resolved_ips": public_ips,
+    }
+
+
+def validate_public_url(url: str) -> str:
+    resolve_public_url(url)
+    return url
+
+
+def fetch_public_response(url: str) -> tuple[str, urllib3.response.BaseHTTPResponse]:
+    resolved = resolve_public_url(url)
+    headers = {
+        "Host": resolved["host"],
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Mafuyu/1.0",
+    }
+
+    last_error: Exception | None = None
+    for ip_text in resolved["resolved_ips"]:
+        try:
+            if resolved["scheme"] == "https":
+                pool = urllib3.HTTPSConnectionPool(
+                    host=ip_text,
+                    port=resolved["port"],
+                    assert_hostname=resolved["host"],
+                    server_hostname=resolved["host"],
+                )
+            else:
+                pool = urllib3.HTTPConnectionPool(
+                    host=ip_text,
+                    port=resolved["port"],
+                )
+
+            response = pool.request(
+                "GET",
+                resolved["target"],
+                headers=headers,
+                redirect=False,
+                timeout=urllib3.Timeout(connect=10.0, read=30.0),
+                retries=False,
+            )
+            if 300 <= response.status < 400:
+                location = response.headers.get("Location", "")
+                raise ValueError(f"HTTP redirects are not allowed: {location}")
+            if response.status >= 400:
+                raise urllib3.exceptions.HTTPError(f"HTTP {response.status}")
+            return resolved["url"], response
+        except Exception as exc:
+            last_error = exc
+            continue
+
+    if last_error is None:
+        raise ValueError("No resolved public IPs were available")
+    raise last_error
 
 
 # ============ File Tools (Full Access Mode) ============
@@ -142,41 +299,37 @@ def copy_file(src: str, dst: str) -> dict:
 def fetch_url(url: str) -> dict:
     """HTTP GET, return text (truncated to max chars)."""
     try:
-        resp = requests.get(url, timeout=30, headers={
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Mafuyu/1.0"
-        })
-        resp.raise_for_status()
-        
-        text = resp.text[:FETCH_MAX_CHARS]
-        truncated = len(resp.text) > FETCH_MAX_CHARS
+        validated_url, resp = fetch_public_response(url)
+        text_full = resp.data.decode("utf-8", errors="replace")
+
+        text = text_full[:FETCH_MAX_CHARS]
+        truncated = len(text_full) > FETCH_MAX_CHARS
         
         return {
-            "url": url,
-            "status": resp.status_code,
+            "url": validated_url,
+            "status": resp.status,
             "content": text,
             "truncated": truncated
         }
-    except requests.RequestException as e:
+    except Exception as e:
         return {"error": f"fetch_url failed: {e}"}
 
 
 def fetch_json(url: str) -> dict:
     """HTTP GET, parse as JSON."""
     try:
-        resp = requests.get(url, timeout=30, headers={
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Mafuyu/1.0"
-        })
-        resp.raise_for_status()
+        validated_url, resp = fetch_public_response(url)
+        body = resp.data.decode("utf-8", errors="strict")
         
         return {
-            "url": url,
-            "status": resp.status_code,
-            "data": resp.json()
+            "url": validated_url,
+            "status": resp.status,
+            "data": json.loads(body)
         }
-    except requests.RequestException as e:
-        return {"error": f"fetch_json failed: {e}"}
     except json.JSONDecodeError as e:
         return {"error": f"JSON parse failed: {e}"}
+    except (ValueError, UnicodeDecodeError, urllib3.exceptions.HTTPError) as e:
+        return {"error": f"fetch_json failed: {e}"}
 
 
 def read_url(url: str) -> dict:
@@ -185,15 +338,12 @@ def read_url(url: str) -> dict:
     Use this to read the details of a search result.
     """
     try:
-        import requests
         from bs4 import BeautifulSoup
+
+        validated_url, resp = fetch_public_response(url)
         
-        resp = requests.get(url, timeout=30, headers={
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Mafuyu/1.0"
-        })
-        resp.raise_for_status()
-        
-        soup = BeautifulSoup(resp.text, "html.parser")
+        html = resp.data.decode("utf-8", errors="replace")
+        soup = BeautifulSoup(html, "html.parser")
         
         # Remove script and style elements
         for script in soup(["script", "style", "nav", "footer", "header"]):
@@ -208,9 +358,11 @@ def read_url(url: str) -> dict:
         text = '\n'.join(chunk for chunk in chunks if chunk)
         
         title = soup.title.string if soup.title else ""
+        if len(text) > 3000:
+            text = text[:3000] + "...(truncated)"
         
         # Auto-summarize if content is too long (> 3000 chars)
-        if len(text) > 3000:
+        if False and len(text) > 3000:
             try:
                 from llm import call_ollama
                 summary_prompt = f"""以下のWebページの内容を、重要なポイントを抽出して300字以内で要約せよ。
@@ -229,7 +381,7 @@ def read_url(url: str) -> dict:
                 text = text[:3000] + "...(truncated)"
             
         return {
-            "url": url,
+            "url": validated_url,
             "title": title,
             "content": text
         }
@@ -360,7 +512,7 @@ def codex_job_start(prompt: str, workdir: str = ".") -> dict:
             cwd=workdir,
             stdout=log_file,
             stderr=subprocess.STDOUT,
-            shell=True,  # For PowerShell on Windows
+            shell=False,
             text=True,
         )
         
@@ -553,24 +705,29 @@ def codex_run_sync(prompt: str, workdir: str = ".") -> dict:
         {"success": bool, "output": str, "exit_code": int}
     """
     try:
-        # Build command with full-auto mode
-        # Sanitize prompt quotes to prevent command breakage
-        # PowerShell requires careful quoting. We use ' for inner quotes.
-        safe_prompt = prompt.replace("'", "''").replace('"', "'") 
-        # Note: -a "never" (quoted) seems more stable on Windows
-        inner_cmd = f"{CODEX_CMD} -a 'never' '{safe_prompt}'"
-        cmd = f'start "Mafuyu Codex Agent" powershell -NoExit -Command "{inner_cmd}; Write-Host \'Done! You can close this window.\' -ForegroundColor Green"'
+        import base64
+
+        prompt_b64 = base64.b64encode(prompt.encode("utf-8")).decode("ascii")
+        codex_cmd_literal = CODEX_CMD.replace("'", "''")
+        ps_script = (
+            "$prompt = [System.Text.Encoding]::UTF8.GetString("
+            f"[System.Convert]::FromBase64String('{prompt_b64}')); "
+            f"$codex = '{codex_cmd_literal}'; "
+            "Start-Process -FilePath $codex "
+            "-ArgumentList @('-a', 'never', $prompt) "
+            "-NoNewWindow -Wait; "
+            "Write-Host 'Done! You can close this window.' -ForegroundColor Green"
+        )
         
         print(f"\n{'='*50}")
         print(f"[Codex] Spawning new window for task: {prompt[:80]}...")
         print(f"{'='*50}\n")
         
-        # Run shell command to spawn window
-        subprocess.run(
-            cmd,
+        subprocess.Popen(
+            ["powershell", "-NoExit", "-Command", ps_script],
             cwd=workdir,
-            shell=True,
-            check=True
+            shell=False,
+            creationflags=getattr(subprocess, "CREATE_NEW_CONSOLE", 0),
         )
         
         return {
@@ -584,18 +741,22 @@ def codex_run_sync(prompt: str, workdir: str = ".") -> dict:
 
 
 
-TOOLS = {
+SAFE_TOOLS = {
     "list_dir": list_dir,
     "read_text": read_text,
+    "fetch_url": fetch_url,
+    "fetch_json": fetch_json,
+    "read_url": read_url,
+    "search_web": search_web,
+    "search_tweets": search_tweets,
+}
+
+PRIVILEGED_TOOLS = {
     "write_text": write_text,
     "delete_file": delete_file,
     "delete_dir": delete_dir,
     "move_file": move_file,
     "copy_file": copy_file,
-    "fetch_url": fetch_url,
-    "fetch_json": fetch_json,
-    "read_url": read_url,
-    "search_web": search_web,
     "codex_job_start": codex_job_start,
     "codex_job_status": codex_job_status,
     "codex_job_stop": codex_job_stop,
@@ -604,19 +765,24 @@ TOOLS = {
     "codex_read_output": codex_read_output,
     "codex_send_input": codex_send_input,
     "run_python_code": run_python_code,
-    "search_tweets": search_tweets,
 }
 
+ALL_TOOLS = {**SAFE_TOOLS, **PRIVILEGED_TOOLS}
+TOOLS = SAFE_TOOLS
 
-def execute_tool(tool_name: str, args: dict) -> str:
+
+def execute_tool(tool_name: str, args: dict, allow_privileged: bool = False) -> str:
     """
     Execute a tool and return result as JSON string.
     """
-    if tool_name not in TOOLS:
+    registry = ALL_TOOLS if allow_privileged else SAFE_TOOLS
+    if not allow_privileged and tool_name in PRIVILEGED_TOOLS:
+        return json.dumps({"error": f"Tool not available in chat context: {tool_name}"})
+    if tool_name not in registry:
         return json.dumps({"error": f"Unknown tool: {tool_name}"})
     
     try:
-        result = TOOLS[tool_name](**args)
+        result = registry[tool_name](**args)
         return json.dumps(result, ensure_ascii=False, indent=2)
     except TypeError as e:
         return json.dumps({"error": f"Invalid arguments for {tool_name}: {e}"})

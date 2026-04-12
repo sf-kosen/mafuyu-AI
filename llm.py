@@ -5,6 +5,7 @@ import requests
 from typing import Optional
 
 from config import OLLAMA_URL, OLLAMA_MODEL
+from tools import describe_available_tools
 
 
 def call_ollama(messages: list[dict], stream: bool = False) -> str:
@@ -154,15 +155,12 @@ WRONG EXAMPLE (DO NOT DO THIS):
 {"action": "write_text", ...}  <-- WRONG! action must be "tool", not the tool name
 
 Available tools:
-- list_dir(path), read_text(path), write_text(path, content)
-- delete_file(path), delete_dir(path), move_file(src, dst), copy_file(src, dst)
-- fetch_url(url), fetch_json(url), search_web(query)
-- codex_job_start(prompt, workdir), codex_job_status(job_id), codex_job_stop(job_id)
+{tool_list}
 
 Rules:
 1. ONE action per response
 2. Use "finish" with a message when goal is complete
-"""
+""".format(tool_list=describe_available_tools())
 
 
 def agent_step(goal: str, history: list[dict], pending_notes: list[str], tool_result: Optional[str] = None) -> dict:
