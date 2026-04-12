@@ -31,29 +31,34 @@ ALLOWED_ROLE_ID = 1453967404307845232
 
 
 def user_has_allowed_role(member) -> bool:
+    """指定ユーザーが開発者ロールを持っているかを返す。"""
     roles = getattr(member, "roles", [])
     return any(role.id == ALLOWED_ROLE_ID for role in roles)
 
 
 def can_use_tools_in_context(is_dm: bool, author) -> bool:
+    """ツール利用を許可するかどうかを判定する。"""
     if is_dm:
         return author.name == ALLOWED_USER
     return user_has_allowed_role(author)
 
 
 def can_chat_in_context(is_dm: bool, author, channel_id: int) -> bool:
+    """会話そのものを許可するかどうかを判定する。"""
     if is_dm:
         return author.name == ALLOWED_USER
     return user_has_allowed_role(author) or channel_id in FREE_CHAT_CHANNELS
 
 
 def command_tools_allowed(ctx) -> bool:
+    """Bot command から privileged な会話機能を使ってよいか判定する。"""
     is_dm = ctx.guild is None
     return can_use_tools_in_context(is_dm, ctx.author)
 
 
 @bot.check
 async def restrict_privileged_commands(ctx):
+    """`!mafuyu` などのコマンド経路にも同じ認可を適用する。"""
     if ctx.command and ctx.command.name in {"clear", "mafuyu"}:
         return command_tools_allowed(ctx)
     return True
@@ -136,6 +141,7 @@ async def on_ready():
 
 @bot.event
 async def on_command_error(ctx, error):
+    """認可チェックで弾いたコマンドには理由を返し、それ以外は上位へ送る。"""
     if isinstance(error, commands.CheckFailure):
         await ctx.reply('You are not allowed to use this command here.', allowed_mentions=discord.AllowedMentions.none())
         return

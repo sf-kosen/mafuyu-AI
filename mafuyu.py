@@ -17,6 +17,7 @@ from config import BASE_DIR
 SYSTEM_PROMPT_PATH = BASE_DIR / "mafuyu_system_prompt.txt"
 FEWSHOT_PATH = BASE_DIR / "mafuyu_fewshot_messages.json"
 CALL_PATTERN = re.compile(r"<call>\s*([a-zA-Z0-9_]+)\s*:\s*(.*?)</call>", re.DOTALL)
+# モデルに見せるのは safe tool だけに限定する。
 MODEL_SAFE_TOOL_LIST = describe_available_tools()
 TOOL_DISABLED_PROMPT = (
     "\n\n[Tool Access]\n"
@@ -139,13 +140,15 @@ class MafuyuSession:
         allow_tools: bool = True,
     ) -> str:
         """
-        Generate a response using ReAct loop.
-        on_progress: Optional callback function(status_text) to report progress.
+        ReAct 風のループで応答を生成する。
+
+        allow_tools=False の場合は会話のみを許可し、`<call>` を使ったツール実行は
+        すべて拒否する。Free Chat などの安全境界はこの引数で保っている。
         """
         # Ensure latest prompt is loaded
         self.system_prompt = load_system_prompt()
         
-        # Build Context
+        # まず system prompt を組み立てる。ここで tool access policy も注入する。
         current_system_prompt = self.system_prompt
         current_system_prompt += TOOL_ENABLED_PROMPT if allow_tools else TOOL_DISABLED_PROMPT
         
@@ -184,7 +187,7 @@ class MafuyuSession:
         
         base_messages.extend(history_to_use)
         
-        # Add User Input
+        # ユーザー入力とメモリ検索結果をまとめて現在の入力にする。
         user_content_list = [user_input]
         if memory_context:
             user_content_list.append(memory_context)
@@ -202,7 +205,7 @@ class MafuyuSession:
             if on_progress and turn > 0:
                 on_progress(f"Thinking... (Turn {turn+1})")
                 
-            # Call LLM
+            # 1ターンごとに LLM を呼び、必要なら tool call を解釈する。
             response_text = call_ollama(current_messages)
             
             # Check for Tool Call: <call>tool: args</call>
@@ -230,6 +233,7 @@ class MafuyuSession:
                 tool_args_str = call_match.group(2).strip()
                 print(f"[Tool Call] {tool_name} -> {tool_args_str}")
 
+                # 会話のみ許可のコンテキストでは tool call を受け付けない。
                 if not allow_tools:
                     current_messages.append({"role": "assistant", "content": response_text})
                     current_messages.append({
@@ -238,6 +242,7 @@ class MafuyuSession:
                     })
                     continue
 
+                # モデルが safe tool 以外を呼ぼうとしても明示的に拒否する。
                 if tool_name not in TOOLS:
                     current_messages.append({"role": "assistant", "content": response_text})
                     current_messages.append({
@@ -363,8 +368,12 @@ class MafuyuSession:
             print(f"[Emotion Update] {user_key}: {param_lower} {sign}{value}")
 
     def _execute_tool_wrapper(self, name: str, raw_args: str) -> str:
-        """Execute a tool and return the result as a formatted string."""
-        # Convert raw_args string to proper dict based on tool type
+        """
+        `<call>` 内の文字列引数をツールごとの辞書形式へ変換して実行する。
+
+        ここでは safe tool だけが `execute_tool()` に渡る前提。
+        """
+        # ツール名ごとに最低限の引数変換を行う。
         
         args = {}
         if name == "search_web":
@@ -416,6 +425,12 @@ class MafuyuSession:
             return f"Error: {e}"
 
     def _prepare_tool_result_for_model(self, tool_name: str, tool_result: str) -> str:
+        """
+        tool result を「次ターンの命令」ではなく「引用データ」として渡すための整形。
+
+        `<` と `>` を escape して、レスポンス内に別の `<call>` が混ざっていても
+        制御トークンとして再解釈されにくくする。
+        """
         payload = {
             "tool_name": tool_name,
             "tool_result": tool_result[:4000],

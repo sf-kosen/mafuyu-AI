@@ -23,6 +23,11 @@ from config import (
 
 
 # ============ Path Safety ============
+#
+# ここでは「ローカルファイル」と「外部URL」の両方に対して境界を作る。
+# - ローカルファイルは data/workspace 配下だけを許可する
+# - 外部URLは public な http(s) だけを許可する
+# - DNS rebinding を避けるため、検証した IP に対して直接接続する
 
 BLOCKED_HOSTNAMES = {
     "localhost",
@@ -60,6 +65,7 @@ PRIVILEGED_TOOL_DESCRIPTIONS = {
 
 
 def describe_available_tools(include_privileged: bool = False) -> str:
+    """モデルに見せるツール一覧を説明文付きで返す。"""
     descriptions = dict(SAFE_TOOL_DESCRIPTIONS)
     if include_privileged:
         descriptions.update(PRIVILEGED_TOOL_DESCRIPTIONS)
@@ -67,7 +73,9 @@ def describe_available_tools(include_privileged: bool = False) -> str:
 
 def safe_path(rel_path: str) -> Path:
     """
-    Resolve a path inside the sandboxed workspace.
+    指定されたパスを sandboxed workspace 内の絶対パスへ解決する。
+
+    `..` などで workspace の外へ出ようとした場合は例外にする。
     """
     path = Path(rel_path)
     if not path.is_absolute():
@@ -85,6 +93,12 @@ def safe_path(rel_path: str) -> Path:
 
 
 def resolve_public_url(url: str) -> dict[str, Any]:
+    """
+    公開URLとして扱ってよいか検証し、接続に必要な情報を返す。
+
+    この段階では DNS を解決して、private / loopback / link-local などの
+    内部向けアドレスが混ざっていないことを確認する。
+    """
     parsed = urlparse(url)
     if parsed.scheme not in {"http", "https"}:
         raise ValueError("Only http:// and https:// URLs are allowed")
@@ -132,11 +146,19 @@ def resolve_public_url(url: str) -> dict[str, Any]:
 
 
 def validate_public_url(url: str) -> str:
+    """URL 検証だけを行いたい呼び出し元向けの薄いラッパー。"""
     resolve_public_url(url)
     return url
 
 
 def fetch_public_response(url: str) -> tuple[str, urllib3.response.BaseHTTPResponse]:
+    """
+    検証済みの public URL に対して実際に GET を行う。
+
+    重要なのは、`requests.get(url)` のようにホスト名へ再解決しないこと。
+    `resolve_public_url()` で得た IP に直接接続し、Host/SNI だけ元ホスト名を使う。
+    これで redirect SSRF と DNS rebinding の両方を抑える。
+    """
     resolved = resolve_public_url(url)
     headers = {
         "Host": resolved["host"],
@@ -146,6 +168,7 @@ def fetch_public_response(url: str) -> tuple[str, urllib3.response.BaseHTTPRespo
     last_error: Exception | None = None
     for ip_text in resolved["resolved_ips"]:
         try:
+            # HTTPS の場合は「接続先IP」と「証明書検証用ホスト名」を分ける。
             if resolved["scheme"] == "https":
                 pool = urllib3.HTTPSConnectionPool(
                     host=ip_text,
@@ -167,6 +190,7 @@ def fetch_public_response(url: str) -> tuple[str, urllib3.response.BaseHTTPRespo
                 timeout=urllib3.Timeout(connect=10.0, read=30.0),
                 retries=False,
             )
+            # redirect を許すと、検証済みの URL から内部URLへ飛ばされる。
             if 300 <= response.status < 400:
                 location = response.headers.get("Location", "")
                 raise ValueError(f"HTTP redirects are not allowed: {location}")
@@ -297,7 +321,7 @@ def copy_file(src: str, dst: str) -> dict:
 # ============ Fetch Tools ============
 
 def fetch_url(url: str) -> dict:
-    """HTTP GET, return text (truncated to max chars)."""
+    """公開URLの本文を文字列として取得する。"""
     try:
         validated_url, resp = fetch_public_response(url)
         text_full = resp.data.decode("utf-8", errors="replace")
@@ -316,7 +340,7 @@ def fetch_url(url: str) -> dict:
 
 
 def fetch_json(url: str) -> dict:
-    """HTTP GET, parse as JSON."""
+    """公開URLの JSON を取得して Python オブジェクトへ変換する。"""
     try:
         validated_url, resp = fetch_public_response(url)
         body = resp.data.decode("utf-8", errors="strict")
@@ -334,8 +358,10 @@ def fetch_json(url: str) -> dict:
 
 def read_url(url: str) -> dict:
     """
-    Fetch URL and extract main text content using BeautifulSoup.
-    Use this to read the details of a search result.
+    Web ページを取得し、人が読みやすい本文テキストへ整形する。
+
+    LLM に外部コンテンツを再要約させると間接プロンプトインジェクションの
+    面が増えるため、ここでは BeautifulSoup で機械的に整形するだけにしている。
     """
     try:
         from bs4 import BeautifulSoup
@@ -345,19 +371,20 @@ def read_url(url: str) -> dict:
         html = resp.data.decode("utf-8", errors="replace")
         soup = BeautifulSoup(html, "html.parser")
         
-        # Remove script and style elements
+        # スクリプトやレイアウト要素は本文抽出のノイズになるので落とす。
         for script in soup(["script", "style", "nav", "footer", "header"]):
             script.decompose()
             
-        # Get text
+        # ページ全体からテキストだけを抜き出す。
         text = soup.get_text(separator="\n")
         
-        # Clean up whitespace
+        # 改行や余白を整えて、読みやすいプレーンテキストに寄せる。
         lines = (line.strip() for line in text.splitlines())
         chunks = (phrase.strip() for line in lines for phrase in line.split("  "))
         text = '\n'.join(chunk for chunk in chunks if chunk)
         
         title = soup.title.string if soup.title else ""
+        # 長すぎるページは deterministic に打ち切る。
         if len(text) > 3000:
             text = text[:3000] + "...(truncated)"
         
@@ -491,8 +518,10 @@ _codex_jobs: dict[str, dict] = {}
 
 def codex_job_start(prompt: str, workdir: str = ".") -> dict:
     """
-    Start Codex CLI as subprocess.
-    Returns job_id for tracking.
+    Codex CLI を別プロセスで起動し、ログファイルへ出力を流す。
+
+    以前は shell=True で起動していたが、コマンドインジェクション面を減らすため
+    いまは shell=False で直接実行している。
     """
     import uuid
     
@@ -694,8 +723,10 @@ def codex_send_input(text: str) -> dict:
 
 def codex_run_sync(prompt: str, workdir: str = ".") -> dict:
     """
-    Spawn Codex in a new terminal window.
-    Returns immediately, leaving Codex running in the new window.
+    新しい PowerShell ウィンドウで Codex を起動する。
+
+    prompt はそのままコマンド文字列へ埋め込まず、Base64 で PowerShell 側へ渡して
+    復元する。これで quoting 崩れや文字列連結ベースの注入リスクを抑える。
     
     Args:
         prompt: Task description for Codex
@@ -707,6 +738,7 @@ def codex_run_sync(prompt: str, workdir: str = ".") -> dict:
     try:
         import base64
 
+        # 引数を PowerShell の文字列連結に直接入れないため、Base64 で渡す。
         prompt_b64 = base64.b64encode(prompt.encode("utf-8")).decode("ascii")
         codex_cmd_literal = CODEX_CMD.replace("'", "''")
         ps_script = (
@@ -723,6 +755,7 @@ def codex_run_sync(prompt: str, workdir: str = ".") -> dict:
         print(f"[Codex] Spawning new window for task: {prompt[:80]}...")
         print(f"{'='*50}\n")
         
+        # shell=False のまま新しいコンソールを開く。
         subprocess.Popen(
             ["powershell", "-NoExit", "-Command", ps_script],
             cwd=workdir,
@@ -773,7 +806,10 @@ TOOLS = SAFE_TOOLS
 
 def execute_tool(tool_name: str, args: dict, allow_privileged: bool = False) -> str:
     """
-    Execute a tool and return result as JSON string.
+    ツールを実行し、その結果を JSON 文字列で返す。
+
+    通常のチャット経路では safe tools だけを公開し、privileged tools は
+    明示的に許可された経路でしか使えないようにしている。
     """
     registry = ALL_TOOLS if allow_privileged else SAFE_TOOLS
     if not allow_privileged and tool_name in PRIVILEGED_TOOLS:
