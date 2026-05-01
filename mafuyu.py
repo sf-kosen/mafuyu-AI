@@ -511,7 +511,20 @@ class MafuyuSession:
         cleaned = self._clean_response(response, "")
         return cleaned if cleaned.strip() else None
 
-    def respond_with_codex(self, user_input: str, user_name: str = None) -> str:
+    def respond_with_codex(
+        self,
+        user_input: str,
+        user_name: str = None,
+        *,
+        is_dm: bool = False,
+        is_owner: bool = False,
+    ) -> str:
+        if not (is_dm and is_owner):
+            return self._clean_response(
+                "Codex実行はownerのDMで明示的に許可された場合だけ使えるよ。",
+                user_input,
+            )
+
         result = codex_run_sync(user_input)
         messages = [{"role": "system", "content": self.system_prompt + UNTRUSTED_DATA_POLICY}]
         messages.extend(self.fewshot)

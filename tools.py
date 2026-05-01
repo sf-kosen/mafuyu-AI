@@ -653,6 +653,7 @@ def codex_job_start(prompt: str, workdir: str = ".") -> dict:
     log_path = LOGS_DIR / f"codex_{job_id}.log"
     
     try:
+        safe_workdir = safe_path(workdir)
         # Build command with non-interactive mode
         cmd = [CODEX_CMD, "-a", "never", prompt]
         
@@ -662,7 +663,7 @@ def codex_job_start(prompt: str, workdir: str = ".") -> dict:
         # Start process
         process = subprocess.Popen(
             cmd,
-            cwd=workdir,
+            cwd=str(safe_workdir),
             stdout=log_file,
             stderr=subprocess.STDOUT,
             shell=False,
@@ -674,7 +675,7 @@ def codex_job_start(prompt: str, workdir: str = ".") -> dict:
             "log_file": log_file,
             "log_path": str(log_path),
             "prompt": prompt,
-            "workdir": workdir,
+            "workdir": str(safe_workdir),
         }
         
         return {
@@ -898,6 +899,7 @@ def codex_run_sync(prompt: str, workdir: str = ".") -> dict:
 
     try:
         import base64
+        safe_workdir = safe_path(workdir)
 
         # 引数を PowerShell の文字列連結に直接入れないため、Base64 で渡す。
         prompt_b64 = base64.b64encode(prompt.encode("utf-8")).decode("ascii")
@@ -919,7 +921,7 @@ def codex_run_sync(prompt: str, workdir: str = ".") -> dict:
         # shell=False のまま新しいコンソールを開く。
         subprocess.Popen(
             ["powershell", "-NoExit", "-Command", ps_script],
-            cwd=workdir,
+            cwd=str(safe_workdir),
             shell=False,
             creationflags=getattr(subprocess, "CREATE_NEW_CONSOLE", 0),
         )
@@ -977,12 +979,12 @@ def execute_tool(
     通常のチャット経路では safe tools だけを公開し、privileged tools は
     明示的に許可された経路でしか使えないようにしている。
     """
-    if allowed_tool_names is not None and tool_name not in allowed_tool_names:
+    effective_allowed_tool_names = set(allowed_tool_names or SAFE_TOOL_NAMES)
+
+    if tool_name not in effective_allowed_tool_names:
         return json.dumps({"error": f"Tool not allowed in this context: {tool_name}"})
 
-    registry = ALL_TOOLS if allow_privileged else SAFE_TOOLS
-    if not allow_privileged and tool_name in PRIVILEGED_TOOLS:
-        return json.dumps({"error": f"Tool not available in chat context: {tool_name}"})
+    registry = ALL_TOOLS
     if tool_name not in registry:
         return json.dumps({"error": f"Unknown tool: {tool_name}"})
     
