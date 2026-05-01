@@ -4,9 +4,11 @@ from unittest.mock import Mock, patch
 
 import mafuyu
 import router
+from agent import run_agent_tick
 from budget import DEFAULT_BUDGET
 from memory import sanitize_memory
 from router import ComputePlan, RouteDecision, RouterContext
+from state import AgentState
 from tools import get_allowed_tool_names
 
 
@@ -107,6 +109,25 @@ class SecurityTests(unittest.TestCase):
 
         execute_tool.assert_called_once()
         call_main.assert_called_once()
+
+    def test_legacy_agent_blocks_dangerous_tool(self):
+        state = AgentState(task_id="securitytest", goal="test dangerous tool")
+        fake_decision = {
+            "action": "tool",
+            "tool_name": "run_python_code",
+            "args": {"code": "print('owned')"},
+            "message": "",
+            "note": "",
+        }
+
+        with patch("agent.agent_step", return_value=fake_decision):
+            with patch("agent.execute_tool") as execute_tool:
+                message, done = run_agent_tick(state)
+
+        self.assertFalse(done)
+        self.assertIn("Tool not allowed", message)
+        self.assertTrue(any("Tool not allowed: run_python_code" in e for e in state.errors))
+        execute_tool.assert_not_called()
 
 
 if __name__ == "__main__":

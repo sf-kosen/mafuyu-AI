@@ -3,7 +3,7 @@ from typing import Optional
 
 from state import AgentState
 from llm import agent_step
-from tools import execute_tool
+from tools import execute_tool, get_allowed_tool_names
 
 
 def run_agent_tick(state: AgentState) -> tuple[str, bool]:
@@ -64,15 +64,19 @@ def run_agent_tick(state: AgentState) -> tuple[str, bool]:
         state.save()
         return f"💬 {message}", False
     
-    # Handle tool (explicit or fallback)
-    # Fallback: if action is a known tool name, treat as tool action
-    from tools import TOOLS
+    allowed_tools = get_allowed_tool_names(
+        allow_tools=True,
+        is_owner=False,
+        is_dm=False,
+        has_allowed_role=False,
+        privileged_confirmed=False,
+    )
     tool_name = decision.get("tool_name", "")
     
     # If action == "tool" use tool_name, else check if action is a tool name
     if action == "tool":
         pass  # use tool_name from decision
-    elif action in TOOLS:
+    elif action in allowed_tools:
         # Fallback: action contains the tool name
         tool_name = action
     else:
@@ -82,9 +86,14 @@ def run_agent_tick(state: AgentState) -> tuple[str, bool]:
         return f"❌ Unknown action: {action}", False
     
     args = decision.get("args", {})
+
+    if tool_name not in allowed_tools:
+        state.add_error(f"Tool not allowed: {tool_name}")
+        state.save()
+        return f"❌ Tool not allowed: {tool_name}", False
     
     # Execute tool
-    result = execute_tool(tool_name, args)
+    result = execute_tool(tool_name, args, allowed_tool_names=allowed_tools)
     
     # Record result
     state.history.append({
