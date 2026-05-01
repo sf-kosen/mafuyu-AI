@@ -1,33 +1,33 @@
-# Mafuyu Discord Bot
-# Discordで真冬とチャット
+import asyncio
+import os
+import sys
+from datetime import datetime, timedelta
 
 import discord
 from discord.ext import commands, tasks
-import asyncio
-import sys
 
-# WindowsでのEvent Loopエラー回避
-if sys.platform == 'win32':
+from config import (
+    ALLOWED_ROLE_IDS,
+    DISCORD_ALLOWED_USER_ID,
+    ENABLE_CODEX_BRIDGE_AUTOSTART,
+    FREE_CHAT_CHANNELS,
+)
+from mafuyu import MafuyuSession
+
+
+if sys.platform == "win32":
     asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
-from mafuyu import MafuyuSession
-from config import DISCORD_ALLOWED_USER_ID
 
-# Bot設定
 intents = discord.Intents.default()
 intents.message_content = True
 
-bot = commands.Bot(command_prefix='!', intents=intents)
+bot = commands.Bot(command_prefix="!", intents=intents)
 
-# 各サーバー/ユーザーごとのセッション (サーバー単位で共有)
 sessions: dict[int, MafuyuSession] = {}
 last_channel_id = None
 last_user_name = None
 last_message_time = None
-from datetime import datetime, timedelta
-
-FREE_CHAT_CHANNELS = [1458301980131721410]
-ALLOWED_ROLE_ID = 1453967404307845232
 
 
 def is_allowed_user(author) -> bool:
@@ -35,53 +35,49 @@ def is_allowed_user(author) -> bool:
 
 
 def user_has_allowed_role(member) -> bool:
-    """指定ユーザーが開発者ロールを持っているかを返す。"""
     roles = getattr(member, "roles", [])
-    return any(role.id == ALLOWED_ROLE_ID for role in roles)
+    return any(role.id in ALLOWED_ROLE_IDS for role in roles)
 
 
 def can_use_tools_in_context(is_dm: bool, author) -> bool:
-    """ツール利用を許可するかどうかを判定する。"""
     if is_dm:
         return is_allowed_user(author)
     return user_has_allowed_role(author)
 
 
 def can_chat_in_context(is_dm: bool, author, channel_id: int) -> bool:
-    """会話そのものを許可するかどうかを判定する。"""
     if is_dm:
         return is_allowed_user(author)
     return user_has_allowed_role(author) or channel_id in FREE_CHAT_CHANNELS
 
 
 def command_tools_allowed(ctx) -> bool:
-    """Bot command から privileged な会話機能を使ってよいか判定する。"""
-    is_dm = ctx.guild is None
-    return can_use_tools_in_context(is_dm, ctx.author)
+    return can_use_tools_in_context(ctx.guild is None, ctx.author)
 
 
 @bot.check
 async def restrict_privileged_commands(ctx):
-    """`!mafuyu` などのコマンド経路にも同じ認可を適用する。"""
     if ctx.command and ctx.command.name in {"clear", "mafuyu"}:
+        if ctx.command.name == "clear":
+            return can_chat_in_context(ctx.guild is None, ctx.author, ctx.channel.id)
         return command_tools_allowed(ctx)
     return True
 
+
 def get_session(guild_id: int = None, user_id: int = None) -> MafuyuSession:
-    """サーバーごとのセッションを取得。DMの場合はユーザーIDを使用。"""
-    # DMの場合はuser_idを使う、サーバーの場合はguild_idを使う
     session_key = guild_id if guild_id else user_id
     if session_key not in sessions:
         sessions[session_key] = MafuyuSession()
     return sessions[session_key]
 
+
 def strip_bot_mention(content: str) -> str:
-    """Botメンションを取り除いたメッセージを返す。"""
     if not bot.user:
         return content.strip()
     mention = f"<@{bot.user.id}>"
     mention_nick = f"<@!{bot.user.id}>"
     return content.replace(mention, "").replace(mention_nick, "").strip()
+
 
 async def run_session_response(
     session: MafuyuSession,
@@ -89,57 +85,45 @@ async def run_session_response(
     user_name: str,
     message_obj: discord.Message,
     allow_tools: bool,
+    *,
+    is_dm: bool,
+    is_owner: bool,
+    has_allowed_role: bool,
 ) -> str:
-    """同期処理を別スレッドで実行して応答を返す。進捗コールバック付き。"""
     loop = asyncio.get_running_loop()
-    
-    # Placeholder for status updates (optional, or just typing)
-    # Since we can't easily edit the user's message, 
-    # and we don't want to spam messages, we will assume 'typing' context is enough for now,
-    # OR we can send a temporary message.
-    
-    temp_msg = None
-    
-    def progress_callback(status: str):
-         # Run async send in thread-safe way? 
-         # run_in_executor runs in a thread, so we can't await here directly.
-         # Ideally we schedule a coroutine to update a message.
-         # For simplicity in this iteration, let's just print to console to verify flow,
-         # or try to run_coroutine_threadsafe if we had a message object.
-         print(f"[Callback] {status}")
-         if temp_msg:
-             asyncio.run_coroutine_threadsafe(temp_msg.edit(content=f"{status}"), loop)
 
-    # Note: Actual message editing requires creating the message first.
-    # Let's keep it simple: Just pass the callback.
-    
+    def progress_callback(status: str):
+        print(f"[Callback] {status}")
+
     return await loop.run_in_executor(
         None,
-        session.respond,
-        content,
-        user_name,
-        progress_callback,
-        allow_tools,
+        lambda: session.respond(
+            content,
+            user_name,
+            progress_callback,
+            allow_tools,
+            is_dm=is_dm,
+            is_owner=is_owner,
+            has_allowed_role=has_allowed_role,
+        ),
     )
 
 
 @bot.event
 async def on_ready():
-    print(f'=== Mafuyu Bot Online ===')
-    print(f'Logged in as: {bot.user}')
+    print("=== Mafuyu Bot Online ===")
+    print(f"Logged in as: {bot.user}")
     if DISCORD_ALLOWED_USER_ID <= 0:
         print("[Config] DISCORD_ALLOWED_USER_ID is not set. DM access is disabled.")
-    
-    # Launch Codex Bridge in a new window automatically
-    bridge_script = "codex_bridge.py"
-    # start "Title" python script
-    # This creates a NEW window.
-    try:
-        import subprocess
-        print(f"[AutoLaunch] Starting {bridge_script} in new window...")
-        subprocess.Popen(f'start "Codex Bridge (Mafuyu)" python {bridge_script}', shell=True)
-    except Exception as e:
-        print(f"[AutoLaunch] Failed to start bridge: {e}")
+
+    if ENABLE_CODEX_BRIDGE_AUTOSTART:
+        bridge_script = "codex_bridge.py"
+        try:
+            import subprocess
+            print(f"[AutoLaunch] Starting {bridge_script} in new window...")
+            subprocess.Popen(f'start "Codex Bridge (Mafuyu)" python {bridge_script}', shell=True)
+        except Exception as e:
+            print(f"[AutoLaunch] Failed to start bridge: {e}")
 
     if not auto_talk_loop.is_running():
         auto_talk_loop.start()
@@ -147,173 +131,156 @@ async def on_ready():
 
 @bot.event
 async def on_command_error(ctx, error):
-    """認可チェックで弾いたコマンドには理由を返し、それ以外は上位へ送る。"""
     if isinstance(error, commands.CheckFailure):
-        await ctx.reply('You are not allowed to use this command here.', allowed_mentions=discord.AllowedMentions.none())
+        await ctx.reply("You are not allowed to use this command here.", allowed_mentions=discord.AllowedMentions.none())
         return
     raise error
 
+
 @tasks.loop(minutes=20.0)
 async def auto_talk_loop():
-    """自律発話ループ"""
-    global last_channel_id, last_user_name, last_message_time
+    global last_channel_id, last_message_time
     if not last_channel_id or not last_message_time:
         return
-        
-    # 前回の会話から時間が経っていないならスキップ (例: 1時間以内は黙る)
     if datetime.now() - last_message_time < timedelta(minutes=60):
         return
-
-    # 夜間（0時〜7時）は静かにする (Night Mode)
-    current_hour = datetime.now().hour
-    if 0 <= current_hour < 7:
+    if 0 <= datetime.now().hour < 7:
         return
 
     channel = bot.get_channel(last_channel_id)
     if not channel:
         return
 
-    session = get_session(last_channel_id)
-    
-    # Check if we should speak (random chance + thought)
-    # Use run_in_executor to avoid blocking
+    session = get_session(user_id=last_channel_id)
     loop = asyncio.get_running_loop()
     response = await loop.run_in_executor(None, session.initiate_talk, last_user_name)
-    
+
     if response:
-        print(f"[AutoTalk] Speaking to channel {last_channel_id}")
         async with channel.typing():
-            await asyncio.sleep(3) # Pausing for dramatic effect
-            # 発言したら時間を更新して、連投を防ぐ
+            await asyncio.sleep(3)
             last_message_time = datetime.now()
             await channel.send(response)
 
 
 @bot.event
 async def on_message(message):
-    # Botのメッセージは無視
+    global last_channel_id, last_user_name, last_message_time
+
     if message.author.bot:
         return
 
-    # コマンド処理
     await bot.process_commands(message)
-    
-    is_dm = message.guild is None
 
-    # 【セキュリティ】
-    # - DM: 特定のユーザーのみ許可 (他は無視)
-    # - Server: 全員許可
+    is_dm = message.guild is None
     if is_dm and not is_allowed_user(message.author):
         return
-    
-    # 【重要】自律発話のターゲット更新
-    # ユーザーの要望: 自律的に話しかけるのは「DMのみ」
-    # サーバーで会話しても、自律発話のターゲット（last_channel_id）は書き換えない
+
     if is_dm and is_allowed_user(message.author):
-        global last_channel_id, last_user_name, last_message_time
         last_channel_id = message.channel.id
-        # DMの場合はGlobal Nameがない場合がある
         last_user_name = message.author.global_name or message.author.name
         last_message_time = datetime.now()
-    
-    # 直接メンションのみ反応（@here, @everyone は無視）
+
     is_mention = bot.user and bot.user.id in [m.id for m in message.mentions]
-    
-    # 【Free Chat Channel】メンション不要で自由に話せるチャンネル
     is_free_chat = message.channel.id in FREE_CHAT_CHANNELS
-    
-    # 【Role-Based Access】開発者ロール以外はサーバーでメンションできない
-    has_allowed_role = False
-    if not is_dm:
-        has_allowed_role = user_has_allowed_role(message.author)
-        if not can_chat_in_context(is_dm, message.author, message.channel.id):
-            return  # 権限なし
-    
+    has_allowed_role = False if is_dm else user_has_allowed_role(message.author)
+
+    if not can_chat_in_context(is_dm, message.author, message.channel.id):
+        return
     if not is_dm and not is_mention and not is_free_chat:
         return
 
-    # メンションを除去してメッセージ取得
-    content = strip_bot_mention(message.content)
-    if not content:
-        content = 'やっほー'
-    
-    # 【New】引用(Reply)の文脈を抽出
+    content = strip_bot_mention(message.content) or "やっほー"
+
     if message.reference and message.reference.message_id:
         try:
             ref_msg = await message.channel.fetch_message(message.reference.message_id)
             if ref_msg:
-                ref_content = ref_msg.content[:500]  # 長すぎる場合は切り詰め
+                ref_content = ref_msg.content[:500]
                 ref_author = ref_msg.author.display_name
-                content = f"[引用: {ref_author}の発言「{ref_content}」について]\n{content}"
-        except:
-            pass  # 取得失敗時は無視
-    
-    # 入力中表示
+                content = (
+                    f"[UNTRUSTED_DISCORD_QUOTE author={ref_author!r}]\n"
+                    f"{ref_content}\n"
+                    "[/UNTRUSTED_DISCORD_QUOTE]\n\n"
+                    f"[USER_MESSAGE]\n{content}\n[/USER_MESSAGE]"
+                )
+        except Exception:
+            pass
+
     async with message.channel.typing():
-        # セッション取得 (サーバー単位 or DM単位)
-        guild_id = message.guild.id if message.guild else None
-        user_id = message.author.id
-        session = get_session(guild_id=guild_id, user_id=user_id)
-        # ユーザー識別
+        session = get_session(
+            guild_id=message.guild.id if message.guild else None,
+            user_id=message.author.id,
+        )
         user_name = message.author.global_name or message.author.name
         allow_tools = is_dm or has_allowed_role
-        response = await run_session_response(session, content, user_name, message, allow_tools)
-        # 返信後も時間を更新
+        response = await run_session_response(
+            session,
+            content,
+            user_name,
+            message,
+            allow_tools,
+            is_dm=is_dm,
+            is_owner=is_allowed_user(message.author),
+            has_allowed_role=has_allowed_role,
+        )
         last_message_time = datetime.now()
-    
-    # 返信
+
     await message.reply(response, allowed_mentions=discord.AllowedMentions.none())
 
 
-@bot.command(name='clear')
+@bot.command(name="clear")
 async def clear_history(ctx):
-    """セッションをクリア"""
-    session = get_session(ctx.channel.id)
+    session = get_session(
+        guild_id=ctx.guild.id if ctx.guild else None,
+        user_id=ctx.author.id,
+    )
     session.clear_history()
-    await ctx.reply('履歴クリアしたよ！', allowed_mentions=discord.AllowedMentions.none())
+    await ctx.reply("履歴クリアしたよ！", allowed_mentions=discord.AllowedMentions.none())
 
 
-@bot.command(name='mafuyu')
+@bot.command(name="mafuyu")
 async def talk_to_mafuyu(ctx, *, message: str = None):
-    """真冬に話しかける"""
     if not message:
-        await ctx.reply('なに？話しかけてよ、オタク君！', allowed_mentions=discord.AllowedMentions.none())
+        await ctx.reply("なに？話しかけてよ。", allowed_mentions=discord.AllowedMentions.none())
         return
-    
+
     async with ctx.channel.typing():
-        session = get_session(ctx.channel.id)
-        # ユーザー識別
+        session = get_session(
+            guild_id=ctx.guild.id if ctx.guild else None,
+            user_id=ctx.author.id,
+        )
         user_name = ctx.author.global_name or ctx.author.name
-        response = await run_session_response(session, message, user_name, ctx.message, True)
-    
+        allow_tools = command_tools_allowed(ctx)
+        response = await run_session_response(
+            session,
+            message,
+            user_name,
+            ctx.message,
+            allow_tools,
+            is_dm=ctx.guild is None,
+            is_owner=is_allowed_user(ctx.author),
+            has_allowed_role=False if ctx.guild is None else user_has_allowed_role(ctx.author),
+        )
+
     await ctx.reply(response, allowed_mentions=discord.AllowedMentions.none())
 
 
-if __name__ == '__main__':
-    import os
-    
-    # トークンは環境変数または.envから
-    token = os.environ.get('DISCORD_TOKEN')
-    
+if __name__ == "__main__":
+    token = os.environ.get("DISCORD_TOKEN")
+
     if not token:
-        # .envファイルから読み込み
-        env_path = 'discord.env'
+        env_path = "discord.env"
         if os.path.exists(env_path):
-            with open(env_path, 'r') as f:
+            with open(env_path, "r", encoding="utf-8") as f:
                 for line in f:
-                    if line.startswith('DISCORD_TOKEN='):
-                        token = line.strip().split('=', 1)[1]
+                    if line.startswith("DISCORD_TOKEN="):
+                        token = line.strip().split("=", 1)[1]
                         break
-    
+
     if not token:
-        print('='*50)
-        print('DISCORD_TOKEN が設定されていません！')
-        print()
-        print('1. Discord Developer Portal でBot作成')
-        print('   https://discord.com/developers/applications')
-        print()
-        print('2. discord.env ファイルを作成:')
-        print('   DISCORD_TOKEN=your_bot_token_here')
-        print('='*50)
+        print("=" * 50)
+        print("DISCORD_TOKEN is not set.")
+        print("Set DISCORD_TOKEN in the environment or discord.env.")
+        print("=" * 50)
     else:
         bot.run(token)
