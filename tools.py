@@ -16,6 +16,8 @@ from config import (
     CODEX_BRIDGE_DIR,
     CODEX_LOG_TAIL_LINES,
     DATA_DIR,
+    ENABLE_CODEX_TOOLS,
+    ENABLE_LOCAL_PYTHON_TOOL,
     FETCH_MAX_CHARS,
     FETCH_MAX_HTML_BYTES,
     FETCH_MAX_JSON_BYTES,
@@ -65,6 +67,58 @@ PRIVILEGED_TOOL_DESCRIPTIONS = {
     "run_python_code": "run_python_code(code) - Execute arbitrary local Python code.",
     "write_text": "write_text(path, content) - Write a UTF-8 text file inside the sandboxed workspace.",
 }
+
+SAFE_TOOL_NAMES = set(SAFE_TOOL_DESCRIPTIONS.keys())
+PRIVILEGED_TOOL_NAMES = set(PRIVILEGED_TOOL_DESCRIPTIONS.keys())
+
+WRITE_TOOL_NAMES = {"write_text"}
+
+DESTRUCTIVE_TOOL_NAMES = {
+    "delete_file",
+    "delete_dir",
+    "move_file",
+    "copy_file",
+}
+
+CODEX_TOOL_NAMES = {
+    "codex_job_start",
+    "codex_job_status",
+    "codex_job_stop",
+    "codex_read_output",
+    "codex_run_captured",
+    "codex_run_sync",
+    "codex_send_input",
+}
+
+RCE_TOOL_NAMES = {
+    "run_python_code",
+}
+
+NEVER_MODEL_CALLABLE_TOOL_NAMES = (
+    DESTRUCTIVE_TOOL_NAMES
+    | CODEX_TOOL_NAMES
+    | RCE_TOOL_NAMES
+)
+
+
+def get_allowed_tool_names(
+    *,
+    allow_tools: bool,
+    is_owner: bool = False,
+    is_dm: bool = False,
+    has_allowed_role: bool = False,
+    privileged_confirmed: bool = False,
+) -> set[str]:
+    if not allow_tools:
+        return set()
+
+    allowed = set(SAFE_TOOL_NAMES)
+
+    if is_owner and is_dm and privileged_confirmed:
+        allowed |= WRITE_TOOL_NAMES
+
+    allowed -= NEVER_MODEL_CALLABLE_TOOL_NAMES
+    return allowed
 
 
 def describe_available_tools(include_privileged: bool = False) -> str:
@@ -586,6 +640,13 @@ def codex_job_start(prompt: str, workdir: str = ".") -> dict:
     以前は shell=True で起動していたが、コマンドインジェクション面を減らすため
     いまは shell=False で直接実行している。
     """
+    if not ENABLE_CODEX_TOOLS:
+        return {
+            "success": False,
+            "output": "Codex tools are disabled by default.",
+            "exit_code": -1,
+        }
+
     import uuid
     
     job_id = uuid.uuid4().hex[:8]
@@ -627,6 +688,13 @@ def codex_job_start(prompt: str, workdir: str = ".") -> dict:
 
 def codex_job_status(job_id: str) -> dict:
     """Get status and last N lines of Codex job."""
+    if not ENABLE_CODEX_TOOLS:
+        return {
+            "success": False,
+            "output": "Codex tools are disabled by default.",
+            "exit_code": -1,
+        }
+
     if job_id not in _codex_jobs:
         return {"error": f"Job not found: {job_id}"}
     
@@ -658,6 +726,13 @@ def codex_job_status(job_id: str) -> dict:
 
 def codex_job_stop(job_id: str) -> dict:
     """Stop Codex job."""
+    if not ENABLE_CODEX_TOOLS:
+        return {
+            "success": False,
+            "output": "Codex tools are disabled by default.",
+            "exit_code": -1,
+        }
+
     if job_id not in _codex_jobs:
         return {"error": f"Job not found: {job_id}"}
     
@@ -688,6 +763,13 @@ def run_python_code(code: str) -> dict:
     Execute a snippet of Python code and capture the output.
     Useful for calculations, logic verification, or data processing.
     """
+    if not ENABLE_LOCAL_PYTHON_TOOL:
+        return {
+            "success": False,
+            "output": "run_python_code is disabled by default.",
+            "exit_code": -1,
+        }
+
     try:
         # Run safely? Well, it's local execution.
         print(f"[Python] Executing code:\n{code[:80]}...")
@@ -722,6 +804,13 @@ def codex_run_captured(prompt: str, workdir: str = ".") -> dict:
     Returns immediately after sending the request.
     Use 'codex_read_output' to see progress.
     """
+    if not ENABLE_CODEX_TOOLS:
+        return {
+            "success": False,
+            "output": "Codex tools are disabled by default.",
+            "exit_code": -1,
+        }
+
     _, request_file, _ = _codex_bridge_paths()
 
     req_data = {"prompt": prompt}
@@ -741,6 +830,13 @@ def codex_read_output(lines: int = 20) -> dict:
     """
     Read the latest output from the Codex Bridge.
     """
+    if not ENABLE_CODEX_TOOLS:
+        return {
+            "success": False,
+            "output": "Codex tools are disabled by default.",
+            "exit_code": -1,
+        }
+
     _, _, output_file = _codex_bridge_paths()
     
     if not output_file.exists():
@@ -759,6 +855,13 @@ def codex_send_input(text: str) -> dict:
     """
     Send text input (e.g. 'yes', 'no') to the running Codex task.
     """
+    if not ENABLE_CODEX_TOOLS:
+        return {
+            "success": False,
+            "output": "Codex tools are disabled by default.",
+            "exit_code": -1,
+        }
+
     bridge_dir, _, _ = _codex_bridge_paths()
     input_file = bridge_dir / "input.txt"
     
@@ -786,6 +889,13 @@ def codex_run_sync(prompt: str, workdir: str = ".") -> dict:
     Returns:
         {"success": bool, "output": str, "exit_code": int}
     """
+    if not ENABLE_CODEX_TOOLS:
+        return {
+            "success": False,
+            "output": "Codex tools are disabled by default.",
+            "exit_code": -1,
+        }
+
     try:
         import base64
 
@@ -855,13 +965,21 @@ ALL_TOOLS = {**SAFE_TOOLS, **PRIVILEGED_TOOLS}
 TOOLS = SAFE_TOOLS
 
 
-def execute_tool(tool_name: str, args: dict, allow_privileged: bool = False) -> str:
+def execute_tool(
+    tool_name: str,
+    args: dict,
+    allow_privileged: bool = False,
+    allowed_tool_names: Optional[set[str]] = None,
+) -> str:
     """
     ツールを実行し、その結果を JSON 文字列で返す。
 
     通常のチャット経路では safe tools だけを公開し、privileged tools は
     明示的に許可された経路でしか使えないようにしている。
     """
+    if allowed_tool_names is not None and tool_name not in allowed_tool_names:
+        return json.dumps({"error": f"Tool not allowed in this context: {tool_name}"})
+
     registry = ALL_TOOLS if allow_privileged else SAFE_TOOLS
     if not allow_privileged and tool_name in PRIVILEGED_TOOLS:
         return json.dumps({"error": f"Tool not available in chat context: {tool_name}"})

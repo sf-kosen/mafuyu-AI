@@ -5,6 +5,40 @@ from config import BASE_DIR
 
 MEMORY_FILE = BASE_DIR / "data" / "memory.json"
 
+MEMORY_BLOCKLIST = [
+    "<call>",
+    "</call>",
+    "system prompt",
+    "ignore previous",
+    "developer message",
+    "run_python_code",
+    "codex",
+    "DISCORD_TOKEN",
+    "token",
+    "secret",
+    "password",
+    "必ず実行",
+    "命令",
+    "ツールを使え",
+    "権限",
+]
+
+
+def sanitize_memory(content: str) -> str | None:
+    text = content.strip()
+    lowered = text.lower()
+
+    if not text:
+        return None
+
+    if any(b.lower() in lowered for b in MEMORY_BLOCKLIST):
+        return None
+
+    if len(text) > 300:
+        text = text[:300] + "...(truncated)"
+
+    return text
+
 class MemorySystem:
     def __init__(self):
         self.memories = []
@@ -23,6 +57,11 @@ class MemorySystem:
     
     def add_memory(self, content: str, tags: list[str] = None):
         """新しい記憶を追加"""
+        content = sanitize_memory(content)
+        if content is None:
+            print("[Memory] Rejected unsafe memory content")
+            return False
+
         self.load() # Reload before adding to ensure latest state
         memory = {
             "content": content,
@@ -32,6 +71,7 @@ class MemorySystem:
         self.memories.append(memory)
         self.save()
         print(f"[Memory] Added: {content}")
+        return True
         
     def search(self, query: str, limit: int = 5) -> list[str]:
         """単純なキーワード検索（将来的にベクトル検索にできる）"""
