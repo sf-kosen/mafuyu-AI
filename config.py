@@ -16,7 +16,7 @@ OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://localhost:11434/api/chat")
 
 OLLAMA_ROUTER_MODEL = os.environ.get("OLLAMA_ROUTER_MODEL", "qwen3.5:0.8b")
 OLLAMA_MAIN_MODEL = os.environ.get("OLLAMA_MAIN_MODEL", "qwen3.5:4b")
-OLLAMA_HEAVY_MODEL = os.environ.get("OLLAMA_HEAVY_MODEL", "qwen3.5:9b")
+OLLAMA_HEAVY_MODEL = os.environ.get("OLLAMA_HEAVY_MODEL", "qwen3.5:4b")
 
 OLLAMA_ROUTER_CTX = int(os.environ.get("OLLAMA_ROUTER_CTX", "2048"))
 OLLAMA_MAIN_CTX = int(os.environ.get("OLLAMA_MAIN_CTX", "4096"))

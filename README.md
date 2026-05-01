@@ -26,16 +26,17 @@ Default RTX 3070 profile:
 | --- | --- | --- |
 | router | `qwen3.5:0.8b` | route/tool/risk JSON decision |
 | main | `qwen3.5:4b` | normal response and tool result synthesis |
-| heavy | `qwen3.5:9b` | optional complex reasoning |
+| heavy | `qwen3.5:4b` | optional complex reasoning within the RTX 3070 profile |
 
-The heavy model is not intended to stay loaded on 8GB VRAM GPUs.
+The RTX 3070 default keeps heavy on `qwen3.5:4b` to avoid CPU offload or load failures. Higher-VRAM machines can override `OLLAMA_HEAVY_MODEL=qwen3.5:9b`.
 
 必要モデル:
 
 ```bash
 ollama pull qwen3.5:0.8b
 ollama pull qwen3.5:4b
-ollama pull qwen3.5:9b
+# Optional high-VRAM override:
+# ollama pull qwen3.5:9b
 ```
 
 RTX 3070 推奨 Ollama 設定:
@@ -96,7 +97,8 @@ pip install requests  # 必要なら
 ```bash
 ollama pull qwen3.5:0.8b
 ollama pull qwen3.5:4b
-ollama pull qwen3.5:9b
+# Optional high-VRAM override:
+# ollama pull qwen3.5:9b
 ```
 5) トークンを設定
 ```bash
@@ -141,7 +143,7 @@ copy .env.example discord.env
 | `OLLAMA_URL` | `http://localhost:11434/api/chat` | Ollama API エンドポイント |
 | `OLLAMA_ROUTER_MODEL` | `qwen3.5:0.8b` | ルーティング/リスク判定モデル |
 | `OLLAMA_MAIN_MODEL` | `qwen3.5:4b` | 通常応答モデル |
-| `OLLAMA_HEAVY_MODEL` | `qwen3.5:9b` | 深い推論用の任意モデル |
+| `OLLAMA_HEAVY_MODEL` | `qwen3.5:4b` | 深い推論用の任意モデル。高VRAM環境では `qwen3.5:9b` へ override 可能 |
 | `REACT_MAX_TURNS` | `2` | fallback ReAct の最大ターン |
 | `ENABLE_BEST_OF_N` | `0` | 任意の Best-of-N 品質モード |
 | `CODEX_CMD` | `codex` | Codex CLI コマンド |
