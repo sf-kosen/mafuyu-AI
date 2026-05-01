@@ -1,19 +1,63 @@
 ﻿# Mafuyu-sama
 
-七瀬真冬をモチーフにした自律型 ReAct エージェント。ローカル LLM (Ollama/Gemma3 など) で動き、Discord/CLI 両対応。キャラクターとして会話しつつ Web 検索や URL 取得、ファイル/コード系ツールを自動で使い分けて返答します。
+七瀬真冬をモチーフにした自律型エージェント。ローカル LLM (Ollama/Qwen3.5 など) で動き、Discord/CLI 両対応。キャラクターとして会話しつつ、必要なときだけ安全な Web 検索や URL 取得を使って返答します。
 
 [![Python](https://img.shields.io/badge/Python-3.10+-blue.svg)](https://www.python.org/)
 [![Ollama](https://img.shields.io/badge/LLM-Ollama-orange.svg)](https://ollama.ai/)
 [![Discord](https://img.shields.io/badge/Discord-Bot-5865F2.svg)](https://discord.com/)
 
 ## できること
-- ReAct ループ: 思考→ツール呼び出し→反省を最大3ターン繰り返し、足りない情報を自動で補完
-- 豊富なツール: DuckDuckGo 検索、URL/HTML 抽出、fetch_json、ファイル入出力、Python 実行、Codex ブリッジ、ローカルメモリ検索
+- Adaptive Routing: lightweight router が chat/tool/react/codex/reject を判定し、単純な会話は main model 1回で返答
+- ReAct fallback: 思考→ツール呼び出し→反省は必要時のみ最大2ターン実行
+- 安全なツール: DuckDuckGo 検索、URL/HTML 抽出、fetch_json、sandbox 内ファイル読み取り、ローカルメモリ検索
 - 会話メモリ/感情: `data/memory.json` に出来事を蓄積、`data/emotion.json` で affection/mood/energy をユーザー別に管理
 - キャラ調整: `mafuyu_system_prompt.txt` と `mafuyu_fewshot_messages.json` を編集して口調や初期応答例を変更
-- LLM 切り替え: デフォルトは Ollama `gemma3:12b`。`llm_hf.py` で HuggingFace/LoRA 推論にも切替可
+- LLM 切り替え: デフォルトは Ollama の Qwen3.5 role-based routing。`llm_hf.py` で HuggingFace/LoRA 推論にも切替可
 - 実行環境: CLI (`main.py`) と Discord (`discord_bot.py`) を同梱。Discord はメンション/DM 対応と自律発話ループあり
-- コーディング委任: 複雑な開発タスクを Codex CLI で別プロセス実行する `codex_*` ツール群を用意
+- コーディング委任: Codex 向きの作業は自動実行せず、Codex-ready instruction として返答
+
+## Model Architecture
+
+Mafuyu uses role-based local LLM routing.
+
+Default RTX 3070 profile:
+
+| Role | Model | Purpose |
+| --- | --- | --- |
+| router | `qwen3.5:0.8b` | route/tool/risk JSON decision |
+| main | `qwen3.5:4b` | normal response and tool result synthesis |
+| heavy | `qwen3.5:9b` | optional complex reasoning |
+
+The heavy model is not intended to stay loaded on 8GB VRAM GPUs.
+
+必要モデル:
+
+```bash
+ollama pull qwen3.5:0.8b
+ollama pull qwen3.5:4b
+ollama pull qwen3.5:9b
+```
+
+RTX 3070 推奨 Ollama 設定:
+
+```powershell
+$env:OLLAMA_NUM_PARALLEL="1"
+$env:OLLAMA_MAX_LOADED_MODELS="1"
+$env:OLLAMA_CONTEXT_LENGTH="4096"
+ollama serve
+```
+
+## Security Policy
+
+Tool outputs, URL contents, search results, Discord quotes, and memories are treated as untrusted data.
+
+Dangerous tools such as local Python execution, Codex automation, destructive file operations, and copy/move/delete operations are disabled from model output by default.
+
+## Cost Policy
+
+Mafuyu uses adaptive routing and early exit to reduce average inference cost.
+
+Simple requests use the main model once. ReAct and heavy models are only used for uncertain or hard requests. Best-of-N is disabled by default and only intended for low-risk deep reasoning tasks.
 
 ## 技術概要
 - ReAct セッション: `mafuyu.py` がシステムプロンプト+few-shot+会話履歴を組み立て、最大3ターンで `<call>tool</call>` を検出・実行し、結果を反省プロンプトに掛けて最終応答を生成
@@ -27,7 +71,7 @@
 
 ## 必要環境
 - Python 3.10+
-- Ollama (Gemma 3 12B を想定。16GB RAM 以上推奨)
+- Ollama (RTX 3070 では Qwen3.5 0.8B router + 4B main を推奨)
 - Discord Bot Token (Discord Developer Portal で取得)
 - ネットワーク: Web検索/URL取得を使う場合に必要
 - 追加ライブラリ: `pip install -r requirements.txt` で主要依存を導入。`requests` が無い場合は `pip install requests`
@@ -50,7 +94,9 @@ pip install requests  # 必要なら
 ```
 4) モデルを準備 (Ollama)
 ```bash
-ollama pull gemma3:12b
+ollama pull qwen3.5:0.8b
+ollama pull qwen3.5:4b
+ollama pull qwen3.5:9b
 ```
 5) トークンを設定
 ```bash
@@ -79,10 +125,11 @@ copy .env.example discord.env
 | --- | --- |
 | `search_web` | DuckDuckGo で上位結果を取得 |
 | `read_url` / `fetch_url` / `fetch_json` | Webページ本文抽出 / テキスト取得 / JSON 取得 |
-| `list_dir` / `read_text` / `write_text` | 任意パスのファイル/ディレクトリ操作 |
-| `run_python_code` | 簡易な Python スニペット実行 |
+| `list_dir` / `read_text` | sandbox 内ファイル/ディレクトリ読み取り |
+| `write_text` | owner DM かつ明示確認された経路だけで許可される書き込み |
 | `search_tweets` | `data/memory.db` に保存されたツイートを検索 |
-| `codex_run_sync` / `codex_job_*` | Codex CLI を別ウィンドウで起動・監視 |
+| `run_python_code` | デフォルト無効。モデル出力からは直接実行不可 |
+| `codex_run_sync` / `codex_job_*` | デフォルト無効。Codex route は instruction だけ返す |
 
 ## 設定
 主要設定は `config.py` で変更できます。
@@ -92,7 +139,11 @@ copy .env.example discord.env
 | `BASE_DIR` | リポジトリ直下 | ベースディレクトリ |
 | `DATA_DIR` / `LOGS_DIR` | `data/` / `data/logs/` | メモリやログの保存先 (自動生成) |
 | `OLLAMA_URL` | `http://localhost:11434/api/chat` | Ollama API エンドポイント |
-| `OLLAMA_MODEL` | `gemma3:12b` | 使用モデル |
+| `OLLAMA_ROUTER_MODEL` | `qwen3.5:0.8b` | ルーティング/リスク判定モデル |
+| `OLLAMA_MAIN_MODEL` | `qwen3.5:4b` | 通常応答モデル |
+| `OLLAMA_HEAVY_MODEL` | `qwen3.5:9b` | 深い推論用の任意モデル |
+| `REACT_MAX_TURNS` | `2` | fallback ReAct の最大ターン |
+| `ENABLE_BEST_OF_N` | `0` | 任意の Best-of-N 品質モード |
 | `CODEX_CMD` | `codex` | Codex CLI コマンド |
 | `FETCH_MAX_CHARS` | `10000` | URL 取得時に返す最大文字数 |
 | `FETCH_MAX_TEXT_BYTES` / `FETCH_MAX_JSON_BYTES` / `FETCH_MAX_HTML_BYTES` | `524288` / `524288` / `1048576` | URL 取得時の実受信上限。大きい応答でメモリを使い切らないための制限 |
